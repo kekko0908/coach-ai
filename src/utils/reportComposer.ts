@@ -1,9 +1,19 @@
 import { HealthData } from '../types';
 import { buildRecentWindowSnapshot } from './coachContext';
-import { buildResponseStyleInstruction, buildUserContextSummary, sendCoachRequest } from './aiClient';
+import { buildResponseStyleInstruction, buildUserContextSummary, prepareCoachRequest, sendCoachRequest, type CoachRequestPreview } from './aiClient';
 
 function toIsoDate(value: Date) {
-  return value.toISOString().split('T')[0];
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value);
+
+  const year = parts.find((part) => part.type === 'year')?.value || '0000';
+  const month = parts.find((part) => part.type === 'month')?.value || '00';
+  const day = parts.find((part) => part.type === 'day')?.value || '00';
+
+  return `${year}-${month}-${day}`;
 }
 
 function addDays(value: Date, days: number) {
@@ -37,6 +47,11 @@ function parseRequestedWindow(userPrompt: string) {
     return { windowDays: Math.max(1, Math.floor((now.getTime() - start.getTime()) / 86400000) + 1), endDate: toIsoDate(now), startDate: toIsoDate(start) };
   }
 
+  if (/\bsettimanal[ei]\b|\bsettimana\b/.test(normalized) && !/\bultim[oi]\s+7\s+giorni\b|\bsettimana scorsa\b|\bscorsa settimana\b/.test(normalized)) {
+    const start = getStartOfWeek(now);
+    return { windowDays: Math.max(1, Math.floor((now.getTime() - start.getTime()) / 86400000) + 1), endDate: toIsoDate(now), startDate: toIsoDate(start) };
+  }
+
   if (/\bieri\b/.test(normalized)) {
     const day = addDays(now, -1);
     return { windowDays: 1, endDate: toIsoDate(day), startDate: toIsoDate(day) };
@@ -57,7 +72,16 @@ function parseRequestedWindow(userPrompt: string) {
     };
   }
 
-  if (/\bultim[oi]\s+7\s+giorni\b|\bscorsa settimana\b/.test(normalized)) {
+  if (/\bquesto mese\b|\bmese corrente\b/.test(normalized)) {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return {
+      windowDays: Math.max(1, Math.floor((now.getTime() - start.getTime()) / 86400000) + 1),
+      endDate: toIsoDate(now),
+      startDate: toIsoDate(start),
+    };
+  }
+
+  if (/\bultim[oi]\s+7\s+giorni\b/.test(normalized)) {
     return { windowDays: 7, endDate: toIsoDate(now), startDate: toIsoDate(addDays(now, -6)) };
   }
 
@@ -70,6 +94,25 @@ function parseRequestedWindow(userPrompt: string) {
   }
 
   return null;
+}
+
+function shouldAttachResearchContext(userPrompt: string, requestedWindow: ReturnType<typeof parseRequestedWindow>) {
+  const normalized = userPrompt.toLowerCase();
+  const explicitlyScientific = /\b(scienz|scientif|studio|studi|paper|evidenz|fonti|fonte|letteratura|research|citaz)\b/.test(normalized);
+
+  if (explicitlyScientific) {
+    return true;
+  }
+
+  if (requestedWindow?.windowDays === 1) {
+    return false;
+  }
+
+  if (/\ballenament[oi]|workout|sessione\b/.test(normalized) && !/\btrend|andamento|ultim[oi]\s+30\s+giorni|ultimo mese\b/.test(normalized)) {
+    return false;
+  }
+
+  return false;
 }
 
 function formatSignedNumber(value: number, digits = 0) {
@@ -130,6 +173,8 @@ function buildKeyNumbersMarkdown(snapshot: ReturnType<typeof buildRecentWindowSn
       .map(([label, count]) => `${label}=${count}`)
       .join(' | ');
     lines.push(`- Allenamenti: ${snapshot.workouts.count} sessioni, ${snapshot.workouts.totalMinutes} min totali, ${snapshot.workouts.totalCalories} kcal, tipi ${workoutBreakdown}.`);
+  } else if (snapshot.workouts.pendingCount > 0) {
+    lines.push(`- Allenamenti: nessuna sessione confermata nella finestra. Sono presenti ${snapshot.workouts.pendingCount} workout pianificati o non ancora confermati.`);
   } else {
     lines.push('- Allenamenti: nessuna sessione registrata nella finestra.');
   }
@@ -164,6 +209,55 @@ interface StructuredHealthReportOptions {
   knowledgeQuery?: string;
   ragQuery?: string;
   extraContextBlocks?: string[];
+  signal?: AbortSignal;
+  thinkingMode?: 'default' | 'enabled' | 'disabled';
+}
+
+export async function buildStructuredHealthReportPreview({
+  userPrompt,
+  healthData,
+  windowDays = 30,
+  knowledgeQuery,
+  ragQuery,
+  extraContextBlocks = [],
+  thinkingMode = 'default',
+}: Omit<StructuredHealthReportOptions, 'signal'>): Promise<CoachRequestPreview> {
+  const requestedWindow = parseRequestedWindow(userPrompt);
+  const includeResearchContext = shouldAttachResearchContext(userPrompt, requestedWindow);
+  const snapshot = buildRecentWindowSnapshot(healthData, {
+    windowDays: requestedWindow?.windowDays ?? windowDays,
+    endDate: requestedWindow?.endDate,
+  });
+  const keyNumbersMarkdown = buildKeyNumbersMarkdown(snapshot);
+
+  return prepareCoachRequest({
+    messages: [{ role: 'user', content: userPrompt }],
+    contextBlocks: [
+      buildUserContextSummary(healthData, {
+        windowDays: snapshot.windowDays,
+        endDate: snapshot.endDate,
+      }),
+      `REPORT NUMBERS BLOCCATI:\n${keyNumbersMarkdown}`,
+      requestedWindow ? `FINESTRA RICHIESTA DALL'UTENTE: ${requestedWindow.startDate} -> ${requestedWindow.endDate}. Usa questa finestra come riferimento temporale principale.` : '',
+      ...extraContextBlocks.filter(Boolean),
+    ],
+    knowledgeQuery: includeResearchContext ? (knowledgeQuery || userPrompt) : undefined,
+    knowledgeScopes: includeResearchContext ? ['training', 'recovery', 'nutrition'] : undefined,
+    ragQuery: includeResearchContext ? (ragQuery || userPrompt) : undefined,
+    annotateRagSources: includeResearchContext,
+    thinkingMode,
+    extraSystemPrompt: `Stai scrivendo un report su dati reali gia riassunti dal sistema.
+${buildResponseStyleInstruction(userPrompt, 'general')}
+- Devi scrivere solo queste sezioni: **Verdetto**, **Punti Positivi**, **Criticita**, **Prossime Azioni**.
+- NON scrivere la sezione **Numeri Chiave**: viene aggiunta dal sistema.
+- NON usare espressioni come "media storica" o confronti extra se non sono nei numeri forniti.
+- NON parlare di "mese precedente", "settimana precedente" o altri periodi esterni: usa solo la finestra osservata e il confronto primo vs ultimo dato della finestra.
+- NON inventare soglie numeriche, date o warning clinici non supportati dai dati o dalle fonti.
+- NON dire che non ci sono infortuni, dolori o sintomi se questi dati non esistono nel contesto.
+- NON proporre soglie arbitrarie tipo "sotto 78 bpm" o "sopra 82 bpm" se non sono presenti nei dati o nelle istruzioni.
+- Quando un dato manca, limita la conclusione e scrivi che il dato non consente di confermare quel punto.
+- Se un dato manca, dillo in modo neutro.`,
+  });
 }
 
 export async function generateStructuredHealthReport({
@@ -173,8 +267,11 @@ export async function generateStructuredHealthReport({
   knowledgeQuery,
   ragQuery,
   extraContextBlocks = [],
+  signal,
+  thinkingMode = 'default',
 }: StructuredHealthReportOptions) {
   const requestedWindow = parseRequestedWindow(userPrompt);
+  const includeResearchContext = shouldAttachResearchContext(userPrompt, requestedWindow);
   const snapshot = buildRecentWindowSnapshot(healthData, {
     windowDays: requestedWindow?.windowDays ?? windowDays,
     endDate: requestedWindow?.endDate,
@@ -191,9 +288,12 @@ export async function generateStructuredHealthReport({
       requestedWindow ? `FINESTRA RICHIESTA DALL'UTENTE: ${requestedWindow.startDate} -> ${requestedWindow.endDate}. Usa questa finestra come riferimento temporale principale.` : '',
       ...extraContextBlocks.filter(Boolean),
     ],
-    knowledgeQuery: knowledgeQuery || userPrompt,
-    knowledgeScopes: ['training', 'recovery', 'nutrition'],
-    ragQuery: ragQuery || userPrompt,
+    knowledgeQuery: includeResearchContext ? (knowledgeQuery || userPrompt) : undefined,
+    knowledgeScopes: includeResearchContext ? ['training', 'recovery', 'nutrition'] : undefined,
+    ragQuery: includeResearchContext ? (ragQuery || userPrompt) : undefined,
+    annotateRagSources: includeResearchContext,
+    thinkingMode,
+    signal,
     extraSystemPrompt: `Stai scrivendo un report su dati reali gia riassunti dal sistema.
 ${buildResponseStyleInstruction(userPrompt, 'general')}
 - Devi scrivere solo queste sezioni: **Verdetto**, **Punti Positivi**, **Criticita**, **Prossime Azioni**.

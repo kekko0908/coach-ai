@@ -3,7 +3,8 @@ import { readCoachMemory } from './coachMemory';
 import { getStoredProfile, getStoredRecords, getStoredWorkouts } from '../lib/appDataStore';
 import { formatRecordValue } from './recordFormatting';
 import { estimateFatigueGroups } from './fatigue';
-import { getConfirmedWorkouts } from './workoutStatus';
+import { getConfirmedWorkouts, isWorkoutCompleted } from './workoutStatus';
+import { calculateReadiness } from './readiness';
 
 const RECENT_WINDOW_DAYS = 30;
 const RECENT_WORKOUT_CONTEXT_LIMIT = 20;
@@ -48,6 +49,7 @@ export interface RecentWindowSnapshot {
     totalMinutes: number;
     totalCalories: number;
     byType: Record<string, number>;
+    pendingCount: number;
   };
   recordEntriesCount: number;
 }
@@ -69,16 +71,30 @@ function isValidDate(value: Date) {
   return Number.isFinite(value.getTime());
 }
 
+function formatLocalIsoDate(value: Date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value);
+
+  const year = parts.find((part) => part.type === 'year')?.value || '0000';
+  const month = parts.find((part) => part.type === 'month')?.value || '00';
+  const day = parts.find((part) => part.type === 'day')?.value || '00';
+
+  return `${year}-${month}-${day}`;
+}
+
 function parseIsoDate(value: string) {
   return new Date(`${value}T00:00:00`);
 }
 
 function formatDateOnly(value: Date) {
   if (!isValidDate(value)) {
-    return new Date().toISOString().split('T')[0];
+    return formatLocalIsoDate(new Date());
   }
 
-  return value.toISOString().split('T')[0];
+  return formatLocalIsoDate(value);
 }
 
 function getCurrentLocalDateString() {
@@ -157,6 +173,12 @@ function getStartOfWeek(value: Date) {
   return date;
 }
 
+function getStartOfMonth(value: Date) {
+  const date = new Date(value);
+  date.setDate(1);
+  return date;
+}
+
 function formatPastRecencyLabel(days: number) {
   if (days <= 0) {
     return 'oggi';
@@ -182,7 +204,7 @@ function formatFutureRecencyLabel(days: number) {
 }
 
 function getDateWindow(endDate: string, days = RECENT_WINDOW_DAYS) {
-  const normalizedEndDate = normalizeDateString(endDate) || new Date().toISOString().split('T')[0];
+  const normalizedEndDate = normalizeDateString(endDate) || getCurrentLocalDateString();
   const end = parseIsoDate(normalizedEndDate);
   const start = shiftDate(end, -(days - 1));
   return {
@@ -210,7 +232,7 @@ function getReferenceDate(healthData: HealthData | null | undefined, workouts: W
     .map((date) => normalizeDateString(date))
     .filter((date): date is string => Boolean(date))
     .sort()
-    .at(-1) || new Date().toISOString().split('T')[0];
+    .at(-1) || getCurrentLocalDateString();
 }
 
 function filterTrendWindow(points: { date: string; value: number }[], start: string, end: string) {
@@ -295,6 +317,79 @@ function getTrendStats(points: { date: string; value: number }[], target?: numbe
     delta: values[values.length - 1] - values[0],
     targetHits: typeof target === 'number' ? values.filter((value) => value >= target).length : null,
   };
+}
+
+function getWorkoutsInRange(workouts: Workout[], start: string, end: string) {
+  return workouts
+    .map((workout) => ({
+      workout,
+      normalizedDate: normalizeDateString(workout.date, end),
+    }))
+    .filter((entry): entry is { workout: Workout; normalizedDate: string } => Boolean(entry.normalizedDate))
+    .filter((entry) => entry.normalizedDate >= start && entry.normalizedDate <= end)
+    .map(({ workout }) => workout);
+}
+
+function formatWorkoutTypeBreakdown(byType: Record<string, number>) {
+  const entries = Object.entries(byType);
+  if (entries.length === 0) {
+    return 'nessuno';
+  }
+
+  return entries
+    .sort((left, right) => right[1] - left[1])
+    .map(([label, count]) => `${label}=${count}`)
+    .join(' | ');
+}
+
+function buildChatPeriodSummary(
+  label: string,
+  healthData: HealthData | null | undefined,
+  profile: UserProfile | null,
+  workouts: Workout[],
+  start: string,
+  end: string,
+) {
+  const fragments: string[] = [`${label} (${start} -> ${end})`];
+
+  if (healthData) {
+    const sleepStats = getTrendStats(filterTrendWindow(healthData.trends.sleep, start, end), profile?.targetSleep);
+    const stepsStats = getTrendStats(filterTrendWindow(healthData.trends.steps, start, end), profile?.targetSteps);
+    const bpmStats = getTrendStats(filterTrendWindow(healthData.trends.bpm ?? [], start, end));
+
+    if (sleepStats) {
+      fragments.push(`sonno medio ${sleepStats.average.toFixed(1)} h`);
+      fragments.push(`delta sonno ${sleepStats.delta >= 0 ? '+' : ''}${sleepStats.delta.toFixed(1)} h`);
+    }
+
+    if (stepsStats) {
+      fragments.push(`passi medi ${Math.round(stepsStats.average)}`);
+    }
+
+    if (bpmStats) {
+      fragments.push(`BPM medio ${Math.round(bpmStats.average)} bpm`);
+    }
+  }
+
+  const periodWorkouts = getWorkoutsInRange(workouts, start, end);
+  const totalMinutes = Math.round(periodWorkouts.reduce((sum, workout) => sum + (workout.durationMinutes || 0), 0));
+  const totalCalories = Math.round(periodWorkouts.reduce((sum, workout) => sum + (workout.caloriesBurned || 0), 0));
+  const byType = periodWorkouts.reduce<Record<string, number>>((accumulator, workout) => {
+    const key = workout.sourceSportLabel || workout.title || workout.type || 'Allenamento';
+    accumulator[key] = (accumulator[key] || 0) + 1;
+    return accumulator;
+  }, {});
+
+  fragments.push(`${periodWorkouts.length} workout`);
+  fragments.push(`tempo totale ${totalMinutes} min`);
+  fragments.push(`calorie totali ${totalCalories} kcal`);
+
+  const typeBreakdown = formatWorkoutTypeBreakdown(byType);
+  if (typeBreakdown !== 'nessuno') {
+    fragments.push(`tipi ${typeBreakdown}`);
+  }
+
+  return `- ${fragments.join(', ')}.`;
 }
 
 function buildWorkoutWindowSummary(workouts: Workout[], start: string, end: string) {
@@ -414,9 +509,10 @@ export function buildRecentWindowSnapshot(
   options: CoachContextWindowOptions = {},
 ): RecentWindowSnapshot {
   const profile = getStoredProfile();
-  const workouts = getConfirmedWorkouts(getStoredWorkouts());
+  const allWorkouts = getStoredWorkouts();
+  const workouts = getConfirmedWorkouts(allWorkouts);
   const records = getStoredRecords();
-  const referenceDate = normalizeDateString(options.endDate || '') || getReferenceDate(healthData, workouts, records);
+  const referenceDate = normalizeDateString(options.endDate || '') || getReferenceDate(healthData, allWorkouts, records);
   const recentWindow = getDateWindow(referenceDate, options.windowDays ?? RECENT_WINDOW_DAYS);
   const sleepTrend = healthData ? filterTrendWindow(healthData.trends.sleep, recentWindow.start, recentWindow.end) : [];
   const stepsTrend = healthData ? filterTrendWindow(healthData.trends.steps, recentWindow.start, recentWindow.end) : [];
@@ -434,6 +530,15 @@ export function buildRecentWindowSnapshot(
     accumulator[key] = (accumulator[key] || 0) + 1;
     return accumulator;
   }, {});
+  const pendingWorkoutCount = allWorkouts
+    .map((workout) => ({
+      workout,
+      normalizedDate: normalizeDateString(workout.date, recentWindow.end),
+    }))
+    .filter((entry): entry is { workout: Workout; normalizedDate: string } => Boolean(entry.normalizedDate))
+    .filter((entry) => entry.normalizedDate >= recentWindow.start && entry.normalizedDate <= recentWindow.end)
+    .filter(({ workout }) => !isWorkoutCompleted(workout))
+    .length;
 
   return {
     windowDays: options.windowDays ?? RECENT_WINDOW_DAYS,
@@ -451,6 +556,7 @@ export function buildRecentWindowSnapshot(
       totalMinutes: Math.round(recentWorkouts.reduce((sum, workout) => sum + (workout.durationMinutes || 0), 0)),
       totalCalories: Math.round(recentWorkouts.reduce((sum, workout) => sum + (workout.caloriesBurned || 0), 0)),
       byType: workoutByType,
+      pendingCount: pendingWorkoutCount,
     },
     recordEntriesCount: getRecentRecordCount(records, recentWindow.start, recentWindow.end),
   };
@@ -548,7 +654,20 @@ function buildDeterministicReportFacts(
 
     lines.push(`- Allenamenti: ${recentWorkouts.length} sessioni, ${Math.round(totalMinutes)} min totali, ${Math.round(totalCalories)} kcal, tipi ${Object.entries(byType).map(([type, count]) => `${type}=${count}`).join(' | ')}.`);
   } else {
-    lines.push('- Allenamenti: nessuna sessione nella finestra recente.');
+    const pendingWorkouts = getStoredWorkouts()
+      .map((workout) => ({
+        workout,
+        normalizedDate: normalizeDateString(workout.date, end),
+      }))
+      .filter((entry): entry is { workout: Workout; normalizedDate: string } => Boolean(entry.normalizedDate))
+      .filter((entry) => entry.normalizedDate >= start && entry.normalizedDate <= end)
+      .filter(({ workout }) => !isWorkoutCompleted(workout));
+
+    if (pendingWorkouts.length > 0) {
+      lines.push(`- Allenamenti: nessuna sessione confermata nella finestra recente; presenti ${pendingWorkouts.length} workout pianificati o non ancora confermati.`);
+    } else {
+      lines.push('- Allenamenti: nessuna sessione nella finestra recente.');
+    }
   }
 
   lines.push(`- Record recenti registrati: ${getRecentRecordCount(records, start, end)} entry nella finestra.`);
@@ -703,13 +822,146 @@ function buildRoutineAdherenceContext(profile: UserProfile | null, workouts: Wor
   return `- Aderenza routine settimana corrente (${weekStartDate} -> ${currentDate}): ${completedSessions}/${weeklyTarget} sessioni registrate; entro oggi erano previsti ${plannedDaysSoFar} giorni attivi, completati ${completedDays} giorni (${paceLabel}).`;
 }
 
+function buildPendingWorkoutContext(workouts: Workout[], currentDate: string) {
+  const pendingWorkouts = workouts
+    .map((workout) => ({
+      workout,
+      normalizedDate: normalizeDateString(workout.date, currentDate),
+    }))
+    .filter((entry): entry is { workout: Workout; normalizedDate: string } => Boolean(entry.normalizedDate))
+    .filter(({ workout }) => !isWorkoutCompleted(workout))
+    .sort((left, right) => right.normalizedDate.localeCompare(left.normalizedDate));
+
+  if (pendingWorkouts.length === 0) {
+    return null;
+  }
+
+  const preview = pendingWorkouts
+    .slice(0, 3)
+    .map(({ workout, normalizedDate }) => `${normalizedDate} ${workout.title || workout.sourceSportLabel || workout.type || 'Allenamento'}`)
+    .join(' | ');
+
+  return `- Workout pianificati ma non ancora confermati: ${pendingWorkouts.length}. Ultimi: ${preview}. Non trattarli come sessioni svolte finche non vengono confermati.`;
+}
+
+function buildChatAlerts(
+  profile: UserProfile | null,
+  healthData: HealthData | null | undefined,
+  workouts: Workout[],
+  currentDate: string,
+) {
+  const alerts: string[] = [];
+
+  if (healthData && profile && healthData.sleep.total < profile.targetSleep - 0.5) {
+    alerts.push(`sonno sotto target (${healthData.sleep.total.toFixed(1)} h vs target ${profile.targetSleep} h)`);
+  }
+
+  const bpmTrend = healthData?.trends.bpm ?? [];
+  if (bpmTrend.length >= 3) {
+    const baselineSlice = bpmTrend.slice(Math.max(0, bpmTrend.length - 6), -1);
+    const lastPoint = bpmTrend.at(-1);
+    if (baselineSlice.length > 0 && lastPoint) {
+      const baseline = baselineSlice.reduce((sum, point) => sum + point.value, 0) / baselineSlice.length;
+      const delta = lastPoint.value - baseline;
+      if (delta >= 4) {
+        alerts.push(`BPM a riposo in salita (+${Math.round(delta)} bpm vs baseline recente)`);
+      }
+    }
+  }
+
+  const topFatigue = estimateFatigueGroups({
+    workouts,
+    currentDate: new Date(),
+  }).find((group) => group.score >= 35);
+  if (topFatigue) {
+    alerts.push(`fatica ${topFatigue.label.toLowerCase()} ${topFatigue.level} (${topFatigue.score}/100)`);
+  }
+
+  const pendingCount = workouts.filter((workout) => {
+    const normalizedDate = normalizeDateString(workout.date, currentDate);
+    return Boolean(normalizedDate && normalizedDate <= currentDate && !isWorkoutCompleted(workout));
+  }).length;
+  if (pendingCount > 0) {
+    alerts.push(`${pendingCount} workout da confermare`);
+  }
+
+  return alerts.slice(0, 3);
+}
+
+export function buildChatCoachContext(healthData?: HealthData | null) {
+  const profile = getStoredProfile();
+  const workouts = getStoredWorkouts();
+  const confirmedWorkouts = getConfirmedWorkouts(workouts);
+  const currentDate = getCurrentLocalDateString();
+  const currentDateValue = parseIsoDate(currentDate);
+  const weekStart = formatDateOnly(getStartOfWeek(currentDateValue));
+  const monthStart = formatDateOnly(getStartOfMonth(currentDateValue));
+  const lines = ['Contesto chat rapido FitSync:'];
+
+  if (profile) {
+    lines.push(`- Profilo: ${profile.name}, ${profile.weight} kg, split ${profile.preferredSplit}, ${profile.trainingDays} giorni/settimana.`);
+    if (profile.activeDays.length > 0) {
+      lines.push(`- Giorni attivi: ${profile.activeDays.join(', ')}.`);
+    }
+  }
+
+  if (profile && healthData) {
+    const readiness = calculateReadiness({
+      profile,
+      healthData,
+      workouts: confirmedWorkouts,
+      currentDate: new Date(),
+    });
+    const topFactors = readiness.factors
+      .filter((factor) => factor.impact < 0)
+      .sort((left, right) => left.impact - right.impact)
+      .slice(0, 3)
+      .map((factor) => `${factor.label} ${factor.impact}`)
+      .join(' | ');
+
+    lines.push(`- Stato rapido oggi ${currentDate}: readiness ${readiness.readinessScore}/100, sonno ${healthData.sleep.total.toFixed(1)} h, bpm ${healthData.bpm}, passi ${healthData.steps}.`);
+    if (topFactors) {
+      lines.push(`- Fattori principali: ${topFactors}.`);
+    }
+  } else if (healthData) {
+    lines.push(`- Stato rapido oggi ${currentDate}: sonno ${healthData.sleep.total.toFixed(1)} h, bpm ${healthData.bpm}, passi ${healthData.steps}.`);
+  }
+
+  const latestWorkouts = confirmedWorkouts
+    .map((workout) => ({
+      workout,
+      normalizedDate: normalizeDateString(workout.date, currentDate),
+    }))
+    .filter((entry): entry is { workout: Workout; normalizedDate: string } => Boolean(entry.normalizedDate))
+    .sort((left, right) => right.normalizedDate.localeCompare(left.normalizedDate))
+    .slice(0, 7)
+    .map(({ workout, normalizedDate }) => `${normalizedDate} ${workout.title || workout.sourceSportLabel || workout.type || 'Allenamento'}${workout.durationMinutes ? ` (${workout.durationMinutes} min)` : ''}`);
+
+  if (latestWorkouts.length > 0) {
+    lines.push(`- Ultimi workout confermati: ${latestWorkouts.join(' | ')}.`);
+  } else {
+    lines.push('- Ultimi workout confermati: nessuno disponibile.');
+  }
+
+  lines.push(buildChatPeriodSummary('Statistiche settimana corrente', healthData, profile, confirmedWorkouts, weekStart, currentDate));
+  lines.push(buildChatPeriodSummary('Statistiche mese corrente', healthData, profile, confirmedWorkouts, monthStart, currentDate));
+
+  const alerts = buildChatAlerts(profile, healthData, workouts, currentDate);
+  if (alerts.length > 0) {
+    lines.push(`- Alert rapidi: ${alerts.join(' | ')}.`);
+  }
+
+  lines.push('- Usa questo blocco come memoria operativa breve; per i dettagli profondi affidati solo alla richiesta corrente e al riassunto chat.');
+  return lines.join('\n');
+}
+
 export function buildGlobalCoachContext(healthData?: HealthData | null, options: CoachContextWindowOptions = {}) {
   const profile = getStoredProfile();
   const workouts = getStoredWorkouts();
   const confirmedWorkouts = getConfirmedWorkouts(workouts);
   const records = getStoredRecords();
   const currentDate = getCurrentLocalDateString();
-  const referenceDate = normalizeDateString(options.endDate || '') || getReferenceDate(healthData, confirmedWorkouts, records);
+  const referenceDate = normalizeDateString(options.endDate || '') || getReferenceDate(healthData, workouts, records);
   const recentWindow = getDateWindow(referenceDate, options.windowDays ?? RECENT_WINDOW_DAYS);
 
   const lines: string[] = ['Contesto utente FitSync:', buildCoachMemoryContext()];
@@ -736,6 +988,11 @@ export function buildGlobalCoachContext(healthData?: HealthData | null, options:
   const routineAdherenceContext = buildRoutineAdherenceContext(profile, confirmedWorkouts, currentDate);
   if (routineAdherenceContext) {
     lines.push(routineAdherenceContext);
+  }
+
+  const pendingWorkoutContext = buildPendingWorkoutContext(workouts, currentDate);
+  if (pendingWorkoutContext) {
+    lines.push(pendingWorkoutContext);
   }
 
   const upcomingDeadlineContext = buildUpcomingDeadlineContext(profile, workouts, currentDate);

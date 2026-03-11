@@ -8,6 +8,7 @@ type AppDataSnapshot = {
   healthData: HealthData | null;
   records: PersonalRecord[];
   thinkerModeEnabled: boolean;
+  scienceModeEnabled: boolean;
 };
 
 const snapshot: AppDataSnapshot = {
@@ -17,6 +18,7 @@ const snapshot: AppDataSnapshot = {
   healthData: null,
   records: [],
   thinkerModeEnabled: false,
+  scienceModeEnabled: false,
 };
 
 export function setStoredProfile(profile: UserProfile | null) {
@@ -65,4 +67,12 @@ export function setStoredThinkerModeEnabled(value: boolean) {
 
 export function getStoredThinkerModeEnabled() {
   return snapshot.thinkerModeEnabled;
+}
+
+export function setStoredScienceModeEnabled(value: boolean) {
+  snapshot.scienceModeEnabled = value;
+}
+
+export function getStoredScienceModeEnabled() {
+  return snapshot.scienceModeEnabled;
 }

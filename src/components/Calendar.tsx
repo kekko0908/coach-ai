@@ -21,6 +21,7 @@ import { hydrateWorkoutsFromSupabase, saveWorkoutsToSupabase } from '../lib/supa
 import { getErrorMessage } from '../utils/errorMessage';
 import { createAppUuid } from '../utils/uuid';
 import { getWorkoutSourceKind, isManualWorkout, isWorkoutCompleted } from '../utils/workoutStatus';
+import { consumePendingCalendarIntent } from '../lib/navigationIntent';
 
 function WorkoutTypeIcon({
   type,
@@ -60,6 +61,10 @@ function formatDurationTag(minutes?: number) {
   return `${minutes} min`;
 }
 
+function parseCalendarIsoDate(value: string) {
+  return new Date(`${value}T00:00:00`);
+}
+
 function buildCompletionState(workout: Workout, isCompleted: boolean) {
   return {
     ...workout,
@@ -79,6 +84,31 @@ export default function Calendar() {
   const [isImporting, setIsImporting] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [isRemoteEmpty, setIsRemoteEmpty] = useState(false);
+
+  const openDateIntent = (day: Date, mode: 'focus' | 'editor' = 'focus') => {
+    setSelectedDate(day);
+    setCurrentDate(day);
+    const targetDate = format(day, 'yyyy-MM-dd');
+    const existingWorkout = workouts.find((w) => w.date === targetDate);
+
+    if (existingWorkout && mode !== 'editor') {
+      setViewingWorkout(existingWorkout);
+      setIsModalOpen(false);
+      return;
+    }
+
+    setViewingWorkout(null);
+    setEditingWorkout(existingWorkout || {
+      id: createAppUuid(),
+      date: targetDate,
+      type: 'workout',
+      sourceKind: 'manual',
+      isCompleted: false,
+      title: '',
+      exercises: [],
+    });
+    setIsModalOpen(true);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -148,24 +178,17 @@ export default function Calendar() {
   const prevMonth = () => setCurrentDate(subMonths(currentDate, 1));
 
   const onDateClick = (day: Date) => {
-    setSelectedDate(day);
-    const existingWorkout = workouts.find((w) => w.date === format(day, 'yyyy-MM-dd'));
-    if (existingWorkout) {
-      setViewingWorkout(existingWorkout);
+    openDateIntent(day);
+  };
+
+  useEffect(() => {
+    const intent = consumePendingCalendarIntent();
+    if (!intent?.date) {
       return;
     }
 
-    setEditingWorkout({
-      id: createAppUuid(),
-      date: format(day, 'yyyy-MM-dd'),
-      type: 'workout',
-      sourceKind: 'manual',
-      isCompleted: false,
-      title: '',
-      exercises: [],
-    });
-    setIsModalOpen(true);
-  };
+    openDateIntent(parseCalendarIsoDate(intent.date), intent.mode || 'focus');
+  }, [workouts]);
 
   const renderHeader = () => {
     return (

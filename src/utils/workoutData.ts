@@ -70,12 +70,22 @@ export interface WorkoutImportMetadata {
 }
 
 function toWorkoutDate(value: string) {
-  const date = new Date(value);
+  const trimmedValue = value.trim();
+  const isoDateMatch = trimmedValue.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoDateMatch) {
+    return isoDateMatch[1];
+  }
+
+  const date = new Date(trimmedValue);
   if (Number.isNaN(date.getTime())) {
     return null;
   }
 
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
 }
 
 type RawPoint = {

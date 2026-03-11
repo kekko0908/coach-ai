@@ -48,12 +48,65 @@ const STOPWORDS = new Set([
   'uno',
 ]);
 
+const TOKEN_SYNONYMS: Record<string, string[]> = {
+  massa: ['ipertrofia', 'forza', 'volume', 'proteine'],
+  muscolare: ['ipertrofia', 'forza', 'volume', 'proteine'],
+  muscolo: ['ipertrofia', 'forza', 'volume', 'proteine'],
+  ipertrofia: ['ipertrofia', 'forza', 'volume', 'proteine'],
+  allenamento: ['forza', 'volume', 'recupero'],
+  allenamenti: ['forza', 'volume', 'recupero'],
+  workout: ['forza', 'volume', 'recupero'],
+  forza: ['forza massimale', 'rpe', 'rir', 'volume'],
+  proteine: ['proteine', 'leucina', 'nutrizione'],
+  dimagrimento: ['nutrizione', 'proteine', 'volume'],
+  recupero: ['recupero', 'sonno', 'hrv'],
+  sonno: ['sonno', 'hrv', 'readiness'],
+  hrv: ['hrv', 'readiness', 'autoregolazione'],
+  calorie: ['nutrizione', 'carboidrati', 'proteine'],
+};
+
 function tokenize(value: string) {
   return value
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
     .filter((token) => token.length >= 3 && !STOPWORDS.has(token));
+}
+
+function expandQueryTokens(tokens: string[]) {
+  const expanded = new Set(tokens);
+
+  tokens.forEach((token) => {
+    Object.entries(TOKEN_SYNONYMS).forEach(([key, synonyms]) => {
+      if (token.includes(key) || key.includes(token)) {
+        synonyms.forEach((synonym) => expanded.add(synonym));
+      }
+    });
+  });
+
+  return Array.from(expanded);
+}
+
+function inferPreferredAreas(queryTokens: string[]) {
+  const joined = queryTokens.join(' ');
+  const preferredAreas = new Set<ScienceInsight['area']>();
+
+  if (/(massa|muscolar|ipertrof|forza|volume)/.test(joined)) {
+    preferredAreas.add('strength_hypertrophy');
+    preferredAreas.add('nutrition');
+  }
+
+  if (/(recuper|sonno|hrv|readiness|fatica)/.test(joined)) {
+    preferredAreas.add('readiness_recovery');
+    preferredAreas.add('autoregulation');
+  }
+
+  if (/(calcio|sprint|agilita|team sports)/.test(joined)) {
+    preferredAreas.add('concurrent_training');
+    preferredAreas.add('injury_prevention');
+  }
+
+  return preferredAreas;
 }
 
 function getPriorityBoost(priority: ScienceInsight['priority']) {
@@ -156,10 +209,13 @@ export function retrieveScienceInsights({
     return [];
   }
 
+  const expandedTokens = expandQueryTokens(queryTokens);
+  const preferredAreas = inferPreferredAreas(expandedTokens);
+
   return SCIENCE_INSIGHTS
     .map((insight) => ({
       insight,
-      score: scoreInsight(insight, queryTokens),
+      score: scoreInsight(insight, expandedTokens) + (preferredAreas.has(insight.area) ? 5 : 0),
     }))
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score)

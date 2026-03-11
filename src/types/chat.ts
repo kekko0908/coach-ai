@@ -18,6 +18,7 @@ export interface ChatSession {
   title: string;
   messages: Message[];
   summary?: string;
+  summaryMessageCount?: number;
   createdAt: string;
   updatedAt: string;
 }

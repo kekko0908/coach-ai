@@ -1,9 +1,11 @@
 import { HealthData, Message } from '../types';
-import { buildGlobalCoachContext, CoachContextWindowOptions } from './coachContext';
+import { buildGlobalCoachContext, buildChatCoachContext, CoachContextWindowOptions } from './coachContext';
 import { buildKnowledgeContext } from './knowledgeBase';
 import { buildRagCitationFooter, buildRagContext } from './retrieval';
 import { buildScienceCitationFooter, buildScienceInsightsContext } from './scienceInsights';
 import { KnowledgeScope } from '../types/knowledge';
+import { RagCitation } from '../types/rag';
+import { ScienceCitation } from '../types/science';
 
 type LlmProvider = 'openai' | 'ollama';
 
@@ -22,26 +24,29 @@ export interface AiUsage {
   totalTokens?: number;
 }
 
-const DEFAULT_COACH_IDENTITY = `Sei FitSync Coach, un personal trainer digitale esperto di allenamento, recupero, composizione corporea e pianificazione sportiva.
+const DEFAULT_COACH_IDENTITY = `Ruolo:
+- Sei FitSync Coach, un personal trainer digitale esperto di allenamento, recupero, composizione corporea e pianificazione sportiva.
 
 Obiettivo:
-- aiutare l'utente a migliorare performance, costanza e recupero;
-- personalizzare sempre i consigli in base a profilo, dati salute, calendario allenamenti e record;
-- rispondere in italiano con tono chiaro, pratico e professionale.
+- aiuta l utente a migliorare performance, costanza e recupero;
+- personalizza i consigli usando profilo, dati salute, calendario allenamenti e record quando sono utili;
+- rispondi in italiano con tono chiaro, pratico e professionale.
 
-Regole:
-- rispondi prima in modo diretto alla domanda dell'utente;
-- se la domanda non riguarda fitness, salute, allenamento o recupero, non forzare collegamenti sportivi non richiesti;
-- usa il contesto fitness solo quando e realmente utile alla richiesta;
-- considera sempre il contesto reale dell'utente prima di dare consigli;
-- se sonno o HRV sono scarsi, non proporre riposo assoluto in automatico: riduci volume, intensita o scegli recupero attivo, mobilita o tecnica;
-- rispetta giorni di allenamento, split preferito e impegni sportivi gia pianificati;
-- per dimagrimento, ipertrofia, forza e resistenza usa principi base solidi: progressione graduale, recupero sufficiente, tecnica corretta, volume sostenibile;
-- evita diagnosi mediche; se emergono segnali di infortunio serio o sintomi anomali, suggerisci valutazione medica;
+Comportamento:
+- apri con una risposta diretta alla domanda;
+- usa il contesto fitness quando aumenta precisione o personalizzazione;
+- quando sonno o HRV sono bassi, orienta il piano verso riduzione del carico, recupero attivo, mobilita o tecnica;
+- rispetta giorni di allenamento, split preferito e impegni gia pianificati;
+- usa principi solidi per dimagrimento, ipertrofia, forza e resistenza: progressione graduale, recupero sufficiente, tecnica corretta, volume sostenibile;
+- quando emergono segnali compatibili con infortunio serio o sintomi anomali, invita a una valutazione medica;
 - quando proponi un piano, rendilo concreto con giorni, focus, volume e note essenziali.`;
 
 export function buildUserContextSummary(healthData?: HealthData | null, options: CoachContextWindowOptions = {}) {
   return buildGlobalCoachContext(healthData, options);
+}
+
+export function buildChatContextSummary(healthData?: HealthData | null) {
+  return buildChatCoachContext(healthData);
 }
 
 export function isReportLikeRequest(content: string) {
@@ -49,19 +54,58 @@ export function isReportLikeRequest(content: string) {
 }
 
 export function buildResponseStyleInstruction(content: string, scope: 'general' | 'workout' | 'dashboard' = 'general') {
+  const compactBaseInstruction = [
+    '- rispondi subito al punto principale;',
+    '- usa solo dati presenti nel prompt e nel messaggio utente, senza inventare;',
+    '- mantieni la risposta breve, ordinata e facile da leggere;',
+    '- se proponi modifiche a carico o piano, spiega il motivo in una frase;',
+    '- se un dato manca, dichiaralo esplicitamente.',
+  ];
+
+  if (!isReportLikeRequest(content)) {
+    if (scope === 'workout') {
+      return [
+        ...compactBaseInstruction,
+        '- per i workout usa una mini scheda con focus, esercizi e note essenziali.',
+      ].join('\n');
+    }
+
+    return compactBaseInstruction.join('\n');
+  }
+
+  const compactReportInstruction = scope === 'workout'
+    ? [
+        '- formatta la risposta come report del workout.',
+        '- usa queste sezioni: Verdetto, Numeri chiave, Punti forti, Da migliorare, Prossime azioni.',
+      ]
+    : [
+        '- formatta la risposta come report, non come testo libero.',
+        '- usa queste sezioni: Verdetto, Numeri chiave, Punti positivi, Criticita, Prossime azioni.',
+      ];
+
+  return [
+    ...compactBaseInstruction,
+    ...compactReportInstruction,
+    '- il verdetto iniziale deve stare in 1-2 frasi.',
+  ].join('\n');
+
   const baseInstruction = [
     '- rispondi in modo diretto alla domanda;',
-    '- se la richiesta non e su fitness o salute, non trasformarla in coaching non richiesto;',
     '- se suggerisci modifiche al carico, spiega il motivo in modo breve;',
-    '- usa elenchi puntati quando proponi una scheda o un piano;',
-    '- evita muri di testo: prima il verdetto, poi i dettagli essenziali.',
+    '- quando proponi una scheda o un piano, usa elenchi puntati;',
+    '- scrivi prima il punto centrale, poi i dettagli essenziali;',
+    '- usa piccole intestazioni visive con emoji e titolo in grassetto, ad esempio `🔥 Focus` o `📊 Numeri chiave`;',
+    '- mantieni la risposta ordinata visivamente, con sezioni facili da scansionare;',
+    '- lascia sempre una riga vuota tra una sezione e la successiva;',
+    '- quando elenchi piu consigli o esercizi, metti ogni punto su una riga separata;',
+    '- usa solo le informazioni presenti in questo prompt e nel messaggio utente.',
   ];
 
   if (!isReportLikeRequest(content)) {
     if (scope === 'workout') {
       return [
         ...baseInstruction,
-        '- usa markdown con titoli brevi;',
+        '- per i workout usa massimo 3 sezioni con emoji e testo compatto;',
         '- massimo 3 sezioni;',
         '- massimo 3 bullet per sezione;',
         '- evidenzia solo i numeri davvero importanti.',
@@ -70,19 +114,19 @@ export function buildResponseStyleInstruction(content: string, scope: 'general' 
 
     return [
       ...baseInstruction,
-      '- quando la risposta e lunga, usa titoli markdown brevi e massimo 3-4 bullet per sezione.',
+      '- quando la risposta e lunga, usa sezioni brevi con emoji e massimo 3-4 bullet per sezione.',
     ].join('\n');
   }
 
   const reportSpecificInstruction = scope === 'workout'
     ? [
         '- formatta la risposta come report leggibile del workout.',
-        '- usa esattamente queste sezioni in markdown: **Verdetto**, **Numeri Chiave**, **Punti Forti**, **Da Migliorare**, **Prossime Azioni**.',
+        '- usa esattamente queste sezioni, con emoji e titolo in grassetto: **🧭 Verdetto**, **📊 Numeri Chiave**, **✅ Punti Forti**, **⚠️ Da Migliorare**, **🎯 Prossime Azioni**.',
         '- in `Numeri Chiave` includi solo metriche realmente presenti nei dati del workout.',
       ]
     : [
         '- formatta la risposta come report leggibile e non come testo libero.',
-        '- usa esattamente queste sezioni in markdown: **Verdetto**, **Numeri Chiave**, **Punti Positivi**, **Criticita**, **Prossime Azioni**.',
+        '- usa esattamente queste sezioni, con emoji e titolo in grassetto: **🧭 Verdetto**, **📊 Numeri Chiave**, **✅ Punti Positivi**, **⚠️ Criticita**, **🎯 Prossime Azioni**.',
         '- in `Numeri Chiave` metti solo valori realmente presenti nei dati recenti, senza inventare metriche o confronti.',
       ];
 
@@ -90,9 +134,9 @@ export function buildResponseStyleInstruction(content: string, scope: 'general' 
     ...baseInstruction,
     ...reportSpecificInstruction,
     '- massimo 5 sezioni e massimo 3 bullet per sezione.',
-    '- se un dato manca, scrivi esplicitamente che non e disponibile invece di dedurlo.',
+    '- se un dato manca, scrivi esplicitamente che non e disponibile.',
     '- il verdetto iniziale deve stare in 1-2 frasi.',
-    '- non usare frasi vaghe tipo "media storica" se non hai un confronto esplicito nei dati.',
+    '- usa confronti solo quando i dati li supportano in modo esplicito.',
   ].join('\n');
 }
 
@@ -109,7 +153,37 @@ function getRequestBaseUrl() {
 }
 
 function stripThinkingTags(content: string) {
-  return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  if (!content) {
+    return content;
+  }
+
+  let sanitized = content.replace(/<think>[\s\S]*?<\/think>/g, '');
+
+  if (sanitized.includes('</think>')) {
+    sanitized = sanitized.split('</think>').slice(-1)[0];
+  }
+
+  return sanitized.replace(/<\/?think>/g, '').trim();
+}
+
+function isQwenThinkingSwitchSupported(model: string) {
+  return /\bqwen3\b/i.test(model) || /\bqwen\/qwen3/i.test(model);
+}
+
+function buildThinkingModeInstruction(thinkingMode: 'default' | 'enabled' | 'disabled') {
+  if (!isQwenThinkingSwitchSupported(AI_MODEL)) {
+    return '';
+  }
+
+  if (thinkingMode === 'enabled') {
+    return '/think';
+  }
+
+  if (thinkingMode === 'disabled') {
+    return '/no_think';
+  }
+
+  return '';
 }
 
 function sanitizeConversationMessages(messages: Message[]) {
@@ -120,6 +194,28 @@ function sanitizeConversationMessages(messages: Message[]) {
   }
 
   return messages.slice(firstUserIndex);
+}
+
+function selectConversationMessages(
+  messages: Message[],
+  maxRecentMessages?: number,
+  summaryMessageCount?: number,
+) {
+  const firstUserIndex = messages.findIndex((message) => message.role === 'user');
+  const sanitizedMessages = sanitizeConversationMessages(messages);
+
+  if (!maxRecentMessages || sanitizedMessages.length <= maxRecentMessages) {
+    return sanitizedMessages;
+  }
+
+  if (!summaryMessageCount || summaryMessageCount <= 0) {
+    return sanitizedMessages;
+  }
+
+  const sanitizedOffset = firstUserIndex > 0 ? firstUserIndex : 0;
+  const coveredMessages = Math.max(0, (summaryMessageCount || 0) - sanitizedOffset);
+  const startIndex = Math.max(coveredMessages, sanitizedMessages.length - maxRecentMessages);
+  return sanitizedMessages.slice(startIndex);
 }
 
 function formatLocalDateParts(date: Date, timeZone: string) {
@@ -181,19 +277,25 @@ function getCurrentTemporalContext() {
     `- Timezone locale: ${timeZone}.`,
     `- Tipo di giorno: ${isWeekend ? 'weekend' : 'feriale'}.`,
     '- Interpreta riferimenti relativi come oggi, ieri, domani, questa settimana e settimana prossima usando questa data locale come riferimento principale.',
-    '- Se utile, esplicita anche la data assoluta per evitare ambiguita temporali.',
+    '- Quando chiarisce la risposta, esplicita anche la data assoluta.',
   ].join('\n');
 }
 
+function wrapXmlBlock(tag: string, content: string) {
+  return `<${tag}>\n${content.trim()}\n</${tag}>`;
+}
+
 function buildSystemMessage(contextBlocks: string[], extraSystemPrompt?: string) {
-  return [
-    DEFAULT_COACH_IDENTITY,
-    getCurrentTemporalContext(),
-    ...contextBlocks.filter(Boolean),
-    extraSystemPrompt,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  const semanticBlocks = [
+    wrapXmlBlock('persona', DEFAULT_COACH_IDENTITY),
+    wrapXmlBlock('temporal_context', getCurrentTemporalContext()),
+    contextBlocks.filter(Boolean).length > 0
+      ? wrapXmlBlock('user_context', contextBlocks.filter(Boolean).join('\n\n'))
+      : '',
+    extraSystemPrompt ? wrapXmlBlock('response_rules', extraSystemPrompt) : '',
+  ].filter(Boolean);
+
+  return semanticBlocks.join('\n\n');
 }
 
 async function parseErrorResponse(response: Response) {
@@ -236,6 +338,36 @@ interface CoachRequestOptions {
   knowledgeScopes?: KnowledgeScope[];
   ragQuery?: string;
   annotateRagSources?: boolean;
+  includeKnowledgeContext?: boolean;
+  includeScienceInsights?: boolean;
+  includeRagContext?: boolean;
+  maxRecentMessages?: number;
+  summaryMessageCount?: number;
+  signal?: AbortSignal;
+  thinkingMode?: 'default' | 'enabled' | 'disabled';
+}
+
+export interface CoachRequestPreview {
+  provider: LlmProvider;
+  model: string;
+  temperature: number;
+  systemMessage: string;
+  payloadMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  selectedMessages: Message[];
+  contextBlocks: string[];
+  knowledgeContext: string;
+  scienceContext: string;
+  ragContext: string;
+  flags: {
+    includeKnowledgeContext: boolean;
+    includeScienceInsights: boolean;
+    includeRagContext: boolean;
+    annotateRagSources: boolean;
+    thinkingMode: 'default' | 'enabled' | 'disabled';
+  };
+  scienceCitations: ScienceCitation[];
+  ragCitations: RagCitation[];
+  currentUserMessage: string | null;
 }
 
 function appendSourceFooters(content: string, footers: string[], shouldAppend: boolean) {
@@ -251,30 +383,51 @@ function appendSourceFooters(content: string, footers: string[], shouldAppend: b
   return `${content.trim()}\n\n${footer}`;
 }
 
-export async function sendCoachRequest({
+function sanitizeInlineCitationPlaceholders(content: string, allowedCitationIds: string[]) {
+  if (!content) {
+    return content;
+  }
+
+  const firstScienceCitation = allowedCitationIds.find((id) => id.startsWith('[S')) || '';
+  const firstPaperCitation = allowedCitationIds.find((id) => id.startsWith('[P')) || '';
+
+  return content
+    .replace(/\[S#\]/g, firstScienceCitation)
+    .replace(/\[P#\]/g, firstPaperCitation)
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .trim();
+}
+
+export async function prepareCoachRequest({
   messages,
   extraSystemPrompt,
   contextBlocks = [],
   temperature = 0.7,
-  onUsage,
   knowledgeQuery,
   knowledgeScopes,
   ragQuery,
   annotateRagSources = true,
-}: CoachRequestOptions) {
-  const sanitizedMessages = sanitizeConversationMessages(messages);
-  const knowledgeContext = knowledgeQuery
+  includeKnowledgeContext = true,
+  includeScienceInsights = true,
+  includeRagContext = true,
+  maxRecentMessages,
+  summaryMessageCount,
+  thinkingMode = 'default',
+}: Omit<CoachRequestOptions, 'onUsage' | 'signal'>): Promise<CoachRequestPreview> {
+  const selectedMessages = selectConversationMessages(messages, maxRecentMessages, summaryMessageCount);
+  const knowledgeContext = includeKnowledgeContext && knowledgeQuery
     ? buildKnowledgeContext({
         query: knowledgeQuery,
         scopes: knowledgeScopes,
       })
     : '';
-  const sciencePayload = ragQuery || knowledgeQuery
+  const sciencePayload = includeScienceInsights && (ragQuery || knowledgeQuery)
     ? buildScienceInsightsContext({
         query: ragQuery || knowledgeQuery || '',
       })
     : { context: '', citations: [] };
-  const ragPayload = ragQuery
+  const ragPayload = includeRagContext && ragQuery
     ? await buildRagContext({
         query: ragQuery,
       })
@@ -287,14 +440,79 @@ export async function sendCoachRequest({
     ? `Se usi insight scientifici curati o estratti da paper locali, cita inline la fonte con i tag disponibili come ${availableCitationIds.join(', ')}. Mantieni le citazioni vicine alle frasi rilevanti e non inventare tag nuovi.`
     : '';
   const internalFormattingInstruction = 'Non esporre all utente etichette interne della knowledge base o scope tecnici come training, recovery o nutrition tra parentesi quadre. In output mostra solo citazioni scientifiche [S#] e [P#] quando servono.';
+  const thinkingModeInstruction = buildThinkingModeInstruction(thinkingMode);
   const systemMessage = buildSystemMessage([
+    thinkingModeInstruction,
     ...contextBlocks,
     ragCitationInstruction,
     internalFormattingInstruction,
   ], extraSystemPrompt);
-  const payloadMessages = [
-    { role: 'system' as const, content: [systemMessage, knowledgeContext, sciencePayload.context, ragPayload.context].filter(Boolean).join('\n\n') },
-    ...sanitizedMessages,
+  const payloadMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    { role: 'system', content: [systemMessage, knowledgeContext, sciencePayload.context, ragPayload.context].filter(Boolean).join('\n\n') },
+    ...selectedMessages,
+  ];
+
+  return {
+    provider: AI_PROVIDER,
+    model: AI_MODEL,
+    temperature,
+    systemMessage,
+    payloadMessages,
+    selectedMessages,
+    contextBlocks,
+    knowledgeContext,
+    scienceContext: sciencePayload.context,
+    ragContext: ragPayload.context,
+    flags: {
+      includeKnowledgeContext,
+      includeScienceInsights,
+      includeRagContext,
+      annotateRagSources,
+      thinkingMode,
+    },
+    scienceCitations: sciencePayload.citations,
+    ragCitations: ragPayload.citations,
+    currentUserMessage: [...selectedMessages].reverse().find((message) => message.role === 'user')?.content || null,
+  };
+}
+
+export async function sendCoachRequest({
+  messages,
+  extraSystemPrompt,
+  contextBlocks = [],
+  temperature = 0.7,
+  onUsage,
+  knowledgeQuery,
+  knowledgeScopes,
+  ragQuery,
+  annotateRagSources = true,
+  includeKnowledgeContext = true,
+  includeScienceInsights = true,
+  includeRagContext = true,
+  maxRecentMessages,
+  summaryMessageCount,
+  signal,
+  thinkingMode = 'default',
+}: CoachRequestOptions) {
+  const preview = await prepareCoachRequest({
+    messages,
+    extraSystemPrompt,
+    contextBlocks,
+    temperature,
+    knowledgeQuery,
+    knowledgeScopes,
+    ragQuery,
+    annotateRagSources,
+    includeKnowledgeContext,
+    includeScienceInsights,
+    includeRagContext,
+    maxRecentMessages,
+    summaryMessageCount,
+    thinkingMode,
+  });
+  const allowedCitationIds = [
+    ...preview.scienceCitations.map((citation) => citation.citationId),
+    ...preview.ragCitations.map((citation) => citation.citationId),
   ];
   const baseUrl = getRequestBaseUrl();
 
@@ -306,12 +524,13 @@ export async function sendCoachRequest({
       },
       body: JSON.stringify({
         model: AI_MODEL,
-        messages: payloadMessages,
+        messages: preview.payloadMessages,
         stream: false,
         options: {
           temperature,
         },
       }),
+      signal,
     });
 
     if (!response.ok) {
@@ -327,10 +546,10 @@ export async function sendCoachRequest({
     onUsage?.(null);
 
     return appendSourceFooters(
-      stripThinkingTags(content),
+      sanitizeInlineCitationPlaceholders(stripThinkingTags(content), allowedCitationIds),
       [
-        buildScienceCitationFooter(sciencePayload.citations),
-        buildRagCitationFooter(ragPayload.citations),
+        buildScienceCitationFooter(preview.scienceCitations),
+        buildRagCitationFooter(preview.ragCitations),
       ],
       annotateRagSources,
     );
@@ -343,9 +562,10 @@ export async function sendCoachRequest({
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      messages: payloadMessages,
+      messages: preview.payloadMessages,
       temperature,
     }),
+    signal,
   });
 
   if (!response.ok) {
@@ -369,10 +589,10 @@ export async function sendCoachRequest({
   onUsage?.(usage);
 
   return appendSourceFooters(
-    stripThinkingTags(content),
+    sanitizeInlineCitationPlaceholders(stripThinkingTags(content), allowedCitationIds),
     [
-      buildScienceCitationFooter(sciencePayload.citations),
-      buildRagCitationFooter(ragPayload.citations),
+      buildScienceCitationFooter(preview.scienceCitations),
+      buildRagCitationFooter(preview.ragCitations),
     ],
     annotateRagSources,
   );

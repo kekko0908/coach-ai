@@ -236,5 +236,6 @@ export function startFreshGeneralChatFromSummary({
   return upsertChatSession({
     ...session,
     summary,
+    summaryMessageCount: initialMessages.length,
   });
 }

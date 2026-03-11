@@ -125,7 +125,7 @@ export default function App() {
     }
 
     if (activeTab === 'chat') {
-      return <Chat healthData={healthData} />;
+      return <Chat healthData={healthData} onNavigateTab={setActiveTab} />;
     }
 
     if (activeTab === 'coach-planner') {

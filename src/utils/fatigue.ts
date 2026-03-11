@@ -11,7 +11,17 @@ const FATIGUE_GROUP_LABELS: Record<FatigueGroupId, string> = {
 };
 
 function toIsoDate(date: Date) {
-  return date.toISOString().split('T')[0];
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value || '0000';
+  const month = parts.find((part) => part.type === 'month')?.value || '00';
+  const day = parts.find((part) => part.type === 'day')?.value || '00';
+
+  return `${year}-${month}-${day}`;
 }
 
 function diffDays(fromIso: string, toIso: string) {
