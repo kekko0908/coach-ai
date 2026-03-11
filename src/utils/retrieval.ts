@@ -302,3 +302,8 @@ export async function getRagLibraryStats() {
     generatedAt: ragIndex.generatedAt,
   };
 }
+
+export async function getAllRagDocuments() {
+  const index = await loadRagIndex();
+  return index.documents;
+}
