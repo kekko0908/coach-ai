@@ -1,0 +1,5 @@
+{
+  "name": "FitSync AI",
+  "description": "A health and fitness dashboard with Apple Health data visualization, local AI chat (DeepSeek/Ollama), and a training planner calendar.",
+  "requestFramePermissions": []
+}
